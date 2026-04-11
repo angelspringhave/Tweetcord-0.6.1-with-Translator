@@ -1,0 +1,11 @@
+services:
+  Tweetcord:
+    image: ghcr.io/yuuzi261/tweetcord:0.6
+    container_name: tweetcord
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data/:/bot/data
+      - ./configs.yml:/bot/configs.yml
+    entrypoint: >
+      sh -c "pip install --upgrade git+https://github.com/mahrtayyab/tweety.git && cd /bot && python bot.py"
