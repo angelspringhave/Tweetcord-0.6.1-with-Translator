@@ -100,6 +100,7 @@ async def monitor_someoka_logs():
 @client.event
 async def on_ready():
     print(f'已登入為 {client.user}，開始檢查染岡同學的翻譯狀況...')
+
 @client.event
 async def on_message(message):
     # 1. 只處理染岡發出的訊息
@@ -136,16 +137,32 @@ async def on_message(message):
             
             # 優先級 1：檢查卡片裡是否有「翻譯自」 (已經翻譯過的)
             if "翻譯自" in embed_full_text:
-                print("偵測到「翻譯自」標記，確認為已翻譯內容，不需翻譯。")
-                return
+                if "原文" in check_text:
+                    parts = check_text.split("原文")
+                    translated_part = parts[0].strip()
+                    original_part = parts[1].strip() if len(parts) > 1 else ""
+                    
+                    if not translated_part:
+                        print("翻譯結果為空白，觸發重新整理。")
+                    elif translated_part == original_part:
+                        print("翻譯結果與原文相同，觸發重新整理。")
+                    elif is_japanese(translated_part):
+                        print("翻譯結果仍包含日文假名，觸發重新整理。")
+                    else:
+                        print("偵測到有效的翻譯內容，不需翻譯。")
+                        return
+                else:
+                    print("偵測到「翻譯自」標記且無原文對照，確認為已翻譯內容，不需翻譯。")
+                    return
             
-            # 優先級 2：判斷是否包含日文假名 (排除純英文、純中文等非日語內容)
-            if not is_japanese(check_text):
-                print("未偵測到日文假名，非為含漢字的日文推文，不需翻譯。")
-                return
+            # 優先級 2：沒有「翻譯自」標記，判斷是否包含日文假名 (排除純英文、純中文等非日語內容)
+            else:
+                if not is_japanese(check_text):
+                    print("未偵測到日文假名，非為含漢字的日文推文，不需翻譯。")
+                    return
             
             # ==============================================================
-            # 走到這裡代表：沒有「翻譯自」 + 「有日文假名」 -> 絕對是需要翻譯的日文推文！
+            # 走到這裡代表：翻譯失敗(空白/偷懶/沒翻好)，或是全新的日文推文 -> 絕對是需要翻譯的推文！
 
             # 4. 產生一個隨機數作為亂碼
             random_num = random.randint(100, 9999)
