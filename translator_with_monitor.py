@@ -115,8 +115,12 @@ async def on_message(message):
         # 2. 判斷是否為 fxtwitter 連結且需要翻譯
         if "fxtwitter.com" in message.content and "/zh-TW" in message.content and "?" not in message.content:
             
+            # 把原本的推文內容(通常就是網址)存起來，方便印在 Log 裡
+            log_url = message.content 
+            print(f"\n🔍 [開始檢查] 收到新推文: {log_url}")
+            
             check_text = ""
-            embed_full_text = "" # 用來全面檢查整張卡片是否有「翻譯自」
+            embed_full_text = "" 
             
             # 6. 【等待邏輯：輪詢檢查】等待原本的預覽跑完
             # 最多等待 10 秒，每 2 秒檢查一次
@@ -127,26 +131,26 @@ async def on_message(message):
                     if updated_msg.embeds:
                         check_text = updated_msg.embeds[0].description or ""
                         embed_full_text = str(updated_msg.embeds[0].to_dict())
+                        # 不會一有字就急著 break，等到「翻譯自」標籤出來，代表 Fxtwitter 真的跑完了才中斷等待
                         
-                        # 💥 【修正1】：不要只要有字就急著 break！
-                        # 要等到「翻譯自」標籤長出來，代表 Fxtwitter 真的跑完了才中斷等待
                         if "翻譯自" in embed_full_text:
                             break 
                 except Exception as e:
-                    print(f"檢查卡片時出錯: {e}")
+                    print(f"⚠️ 檢查卡片時出錯: {e} | 網址: {log_url}")
             
             # 如果等了 10 秒連內文都沒有，直接放生
             if not check_text:
+                print(f"❌ [放棄] 等待超時，抓不到卡片內容 | 網址: {log_url}")
                 return 
 
             # 裝上過濾器！如果判定不需要翻譯(空字串、全符號)，直接結束
             if not check_needs_translation(check_text):
-                print("推文內容為空、僅含網址或無意義符號，省略翻譯。")
+                print(f"⏭️ [省略] 內容為空或無意義符號 | 網址: {log_url}")
                 return
             
             # ================== 【乾淨俐落的兩段式過濾】 ==================
             
-            # 優先級 1：檢查卡片裡是否有「翻譯自」 (代表 Fxtwitter 有嘗試翻譯)
+            # 優先級 1：檢查卡片裡是否有「翻譯自」(代表 Fxtwitter 有嘗試翻譯)
             if "翻譯自" in embed_full_text:
                 if "原文" in check_text:
                     parts = check_text.split("原文")
@@ -154,31 +158,31 @@ async def on_message(message):
                     original_part = parts[1].strip() if len(parts) > 1 else ""
                     
                     if not translated_part:
-                        print("翻譯結果為空白，觸發重新整理。")
+                        print(f"🔄 [重整] 翻譯結果為空白 | 網址: {log_url}")
                     elif translated_part == original_part:
-                        print("翻譯結果與原文相同 (機翻偷懶)，觸發重新整理。")
+                        print(f"🔄 [重整] 翻譯結果與原文相同 (無效翻譯) | 網址: {log_url}")
                     elif is_japanese(translated_part):
-                        print("翻譯結果仍包含日文假名，觸發重新整理。")
+                        print(f"🔄 [重整] 翻譯結果仍包含日文假名 | 網址: {log_url}")
                     elif not has_chinese(translated_part):
-                        print("翻譯結果完全沒有中文，機翻失敗，觸發重新整理。")
+                        print(f"🔄 [重整] 翻譯結果完全不含中文 (翻譯失敗) | 網址: {log_url}")
                     else:
-                        print("偵測到有效的翻譯內容，不需翻譯。")
+                        print(f"✅ [通過] 偵測到有效翻譯，不需處理 | 網址: {log_url}")
                         return
                 else:
-                    print("偵測到「翻譯自」標記且無原文對照，確認為已翻譯內容，不需翻譯。")
+                    print(f"✅ [通過] 有「翻譯自」且無原文對照，確認為已翻譯 | 網址: {log_url}")
                     return
             
-            # 優先級 2：沒有「翻譯自」標記 (代表 Fxtwitter 完全沒反應)
+            # 優先級 2：沒有「翻譯自」標記(代表 Fxtwitter 全無反應)
             else:
-                # 💥 【修正2】：拔掉排外邏輯！
-                # 只要整段文字「沒有中文」(代表是外文)，或是「含有日文假名」，就一律觸發重整！
+                # 只要整段文字「沒有中文」(代表是外文)，或是「含有日文假名」，一律觸發重整
                 if not has_chinese(check_text) or is_japanese(check_text):
-                    print("發現未翻譯的外文推文 (無中文或含日文)，觸發重新整理。")
+                    print(f"🔄 [重整] 發現未翻譯的外文推文 (無中文或含日文) | 網址: {log_url}")
                 else:
-                    print("推文為純中文，不需翻譯。")
+                    print(f"✅ [通過] 推文為純中文，不需翻譯 | 網址: {log_url}")
                     return
             
             # ==============================================================
+            # 走到這裡代表需要重整
 
             # 4. 產生一個隨機數作為亂碼
             random_num = random.randint(100, 9999)
@@ -187,6 +191,7 @@ async def on_message(message):
             refreshed_url = message.content.replace("/zh-TW", f"/zh-TW?{random_num}")
             
             # 7. 送出翻譯訊息
+            print(f"📤 [發送] 已送出重整網址: {refreshed_url}")
             await message.channel.send(f"**真是的～染岡同學想說的是這個吧** ❄️\n{refreshed_url}")
 
 # 啟動機器人
