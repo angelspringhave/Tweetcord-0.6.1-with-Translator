@@ -56,6 +56,10 @@ def is_japanese(text):
     # 這是區分日文與中文最準確的方法
     return re.search(r'[\u3040-\u30ff]', text) is not None
 
+def has_chinese(text):
+    # 偵測是否包含任何中文字符 (CJK 統一表意文字)
+    return re.search(r'[\u4e00-\u9fa5]', text) is not None
+
 # ================== 吹雪的秘密監視任務 ==================
 async def monitor_someoka_logs():
     await client.wait_until_ready()
@@ -148,6 +152,8 @@ async def on_message(message):
                         print("翻譯結果與原文相同，觸發重新整理。")
                     elif is_japanese(translated_part):
                         print("翻譯結果仍包含日文假名，觸發重新整理。")
+                    elif not has_chinese(translated_part):
+                        print("翻譯結果完全沒有中文，機翻失敗，觸發重新整理。")
                     else:
                         print("偵測到有效的翻譯內容，不需翻譯。")
                         return
