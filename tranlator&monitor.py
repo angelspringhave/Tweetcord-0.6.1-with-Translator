@@ -14,6 +14,12 @@ load_dotenv()
 BOT_TOKEN = os.getenv('TRANSLATOR_TOKEN')
 TARGET_BOT_ID = 1492439449714561044
 
+# --- 新增的監控設定 ---
+# 替換成你想收到警報的 Discord 頻道 ID (請複製頻道ID，這必須是純數字，不能有引號)
+ALERT_CHANNEL_ID = 1489990475242012834 
+# 替換成你的染岡 Docker 容器名稱 (可以在 VM 輸入 docker ps 查看 NAMES 那欄)
+DOCKER_CONTAINER_NAME = "tweetcord"
+
 # 建立 client 物件 (必須放在 event 之前)
 intents = discord.Intents.default()
 intents.message_content = True  # 必須開啟才能讀取網址內容
@@ -49,6 +55,47 @@ def is_japanese(text):
     # 偵測是否含有平假名 (\u3040-\u309f) 或 片假名 (\u30a0-\u30ff)
     # 這是區分日文與中文最準確的方法
     return re.search(r'[\u3040-\u30ff]', text) is not None
+
+# ================== 吹雪的秘密監視任務 ==================
+async def monitor_someoka_logs():
+    await client.wait_until_ready()
+    channel = client.get_channel(ALERT_CHANNEL_ID)
+    
+    if not channel:
+        print("找不到警報頻道，請確認 ALERT_CHANNEL_ID 是否正確！")
+        return
+
+    while not client.is_closed():
+        try:
+            # 讓吹雪執行指令，抓取染岡 Docker 的最後 30 行日誌
+            cmd = f"docker logs --tail 30 {DOCKER_CONTAINER_NAME}"
+            
+            # 使用異步執行，避免這動作卡住吹雪原本的翻譯工作
+            process = await asyncio.create_subprocess_shell(
+                cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+            
+            # Docker 的日誌有時候會跑到 stderr，所以兩個都抓出來看
+            logs = stdout.decode('utf-8') + stderr.decode('utf-8')
+
+            # 檢查日誌裡有沒有出現 Token 過期的關鍵字
+            if "401" in logs or "Unauthorized" in logs:
+                await channel.send("🚨 **警告！** 染岡同學，你的 Twitter Token 好像過期了～")
+                print("已發送 auth_token 過期警告！")
+                # 為了避免吹雪每 10 分鐘就一直狂發訊息洗版，發送一次後讓他暫停監視 12 小時 (43200秒)
+                await asyncio.sleep(43200)
+                continue
+                
+        except Exception as e:
+            print(f"吹雪監控 Docker 出錯: {e}")
+
+        # 如果沒事，吹雪就去休息，10 分鐘 (600秒) 後再來偷看一次
+        await asyncio.sleep(600)
+
+# ========================================================
 
 @client.event
 async def on_ready():
