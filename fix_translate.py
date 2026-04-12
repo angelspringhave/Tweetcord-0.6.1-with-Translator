@@ -31,7 +31,7 @@ async def on_message(message):
         # 2. 判斷是否為 fxtwitter 連結且需要翻譯
         if "fxtwitter.com" in message.content and "/zh-TW" in message.content and "?" not in message.content:
             
-            # 6.【優化後的等待邏輯：輪詢檢查】等待原本的預覽跑完，並進行輪詢檢查
+            # 6. 【優化後的等待邏輯：輪詢檢查】等待原本的預覽跑完，並進行輪詢檢查
             # 最多等待 10 秒，每 2 秒檢查一次預覽卡片是否長出來了
             check_text = ""
             for i in range(5): 
