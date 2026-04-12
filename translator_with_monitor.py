@@ -166,10 +166,10 @@ async def on_message(message):
                     elif not has_chinese(translated_part):
                         print(f"🔄 [重整] 翻譯結果完全不含中文 (翻譯失敗) | 網址: {log_url}")
                     else:
-                        print(f"✅ [通過] 偵測到有效翻譯，不需處理 | 網址: {log_url}")
+                        print(f"\n✅ [通過] 偵測到有效翻譯，不需處理 | 網址: {log_url}")
                         return
                 else:
-                    print(f"✅ [通過] 有「翻譯自」且無原文對照，確認為已翻譯 | 網址: {log_url}")
+                    print(f"\n✅ [通過] 有「翻譯自」且無原文對照，確認為已翻譯 | 網址: {log_url}")
                     return
             
             # 優先級 2：沒有「翻譯自」標記(代表 Fxtwitter 全無反應)
@@ -178,7 +178,7 @@ async def on_message(message):
                 if not has_chinese(check_text) or is_japanese(check_text):
                     print(f"🔄 [重整] 發現未翻譯的外文推文 (無中文或含日文) | 網址: {log_url}")
                 else:
-                    print(f"✅ [通過] 推文為純中文，不需翻譯 | 網址: {log_url}")
+                    print(f"\n✅ [通過] 推文為純中文，不需翻譯 | 網址: {log_url}")
                     return
             
             # ==============================================================
