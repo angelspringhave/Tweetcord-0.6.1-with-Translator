@@ -4,4 +4,4 @@
 2. 在 VS Code：按下 Commit 和 Sync Changes（Push），把修改推上 GitHub。
 3. VM 裡：一律先輸入 cd Tweetcord（cd ~/Tweetcord）
 4. VM 裡：輸入 git pull （origin main） 更新檔案，然後重開吹雪，執行 pkill -f translator_with_monitor.py
-nohup python3 translator_with_monitor.py &
+nohup python3 -u translator_with_monitor.py &

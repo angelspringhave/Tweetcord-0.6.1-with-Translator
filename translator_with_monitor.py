@@ -1,4 +1,6 @@
 ﻿import discord
+import sys
+sys.stdout.reconfigure(encoding='utf-8')
 import asyncio
 import random
 import re
@@ -116,22 +118,27 @@ async def on_message(message):
             check_text = ""
             embed_full_text = "" # 用來全面檢查整張卡片是否有「翻譯自」
             
-            # 6. 【等待邏輯：輪詢檢查】等待原本的預覽跑完，並進行輪詢檢查
-            # 最多等待 10 秒，每 2 秒檢查一次預覽卡片是否長出來了
+            # 6. 【等待邏輯：輪詢檢查】等待原本的預覽跑完
+            # 最多等待 10 秒，每 2 秒檢查一次
             for i in range(5): 
                 await asyncio.sleep(2) 
-                # 重新從伺服器抓取訊息
                 try:
                     updated_msg = await message.channel.fetch_message(message.id)
                     if updated_msg.embeds:
                         check_text = updated_msg.embeds[0].description or ""
-                        # 把整張卡片的所有資訊(包含底部 Footer)轉成字串，一網打盡
                         embed_full_text = str(updated_msg.embeds[0].to_dict())
-                        if check_text:
-                            break
+                        
+                        # 💥 【修正1】：不要只要有字就急著 break！
+                        # 要等到「翻譯自」標籤長出來，代表 Fxtwitter 真的跑完了才中斷等待
+                        if "翻譯自" in embed_full_text:
+                            break 
                 except Exception as e:
                     print(f"檢查卡片時出錯: {e}")
             
+            # 如果等了 10 秒連內文都沒有，直接放生
+            if not check_text:
+                return 
+
             # 裝上過濾器！如果判定不需要翻譯(空字串、全符號)，直接結束
             if not check_needs_translation(check_text):
                 print("推文內容為空、僅含網址或無意義符號，省略翻譯。")
@@ -139,7 +146,7 @@ async def on_message(message):
             
             # ================== 【乾淨俐落的兩段式過濾】 ==================
             
-            # 優先級 1：檢查卡片裡是否有「翻譯自」 (已經翻譯過的)
+            # 優先級 1：檢查卡片裡是否有「翻譯自」 (代表 Fxtwitter 有嘗試翻譯)
             if "翻譯自" in embed_full_text:
                 if "原文" in check_text:
                     parts = check_text.split("原文")
@@ -149,7 +156,7 @@ async def on_message(message):
                     if not translated_part:
                         print("翻譯結果為空白，觸發重新整理。")
                     elif translated_part == original_part:
-                        print("翻譯結果與原文相同，觸發重新整理。")
+                        print("翻譯結果與原文相同 (機翻偷懶)，觸發重新整理。")
                     elif is_japanese(translated_part):
                         print("翻譯結果仍包含日文假名，觸發重新整理。")
                     elif not has_chinese(translated_part):
@@ -161,14 +168,17 @@ async def on_message(message):
                     print("偵測到「翻譯自」標記且無原文對照，確認為已翻譯內容，不需翻譯。")
                     return
             
-            # 優先級 2：沒有「翻譯自」標記，判斷是否包含日文假名 (排除純英文、純中文等非日語內容)
+            # 優先級 2：沒有「翻譯自」標記 (代表 Fxtwitter 完全沒反應)
             else:
-                if not is_japanese(check_text):
-                    print("未偵測到日文假名，非為含漢字的日文推文，不需翻譯。")
+                # 💥 【修正2】：拔掉排外邏輯！
+                # 只要整段文字「沒有中文」(代表是外文)，或是「含有日文假名」，就一律觸發重整！
+                if not has_chinese(check_text) or is_japanese(check_text):
+                    print("發現未翻譯的外文推文 (無中文或含日文)，觸發重新整理。")
+                else:
+                    print("推文為純中文，不需翻譯。")
                     return
             
             # ==============================================================
-            # 走到這裡代表：翻譯失敗(空白/偷懶/沒翻好)，或是全新的日文推文 -> 絕對是需要翻譯的推文！
 
             # 4. 產生一個隨機數作為亂碼
             random_num = random.randint(100, 9999)
