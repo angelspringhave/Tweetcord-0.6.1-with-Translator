@@ -2,17 +2,48 @@ import discord
 import asyncio
 import random
 import re
+import os
+from dotenv import load_dotenv
 
 # ================= 設定區 =================
+# 載入 .env 檔案裡的機密資料
+load_dotenv()
+
+# 透過 os.getenv 抓取 .env 裡名為 TRANSLATOR_TOKEN 的值
 # 吹雪的token與染岡的使用者ID
-BOT_TOKEN = 'MTQ5MjU0NTkxMjY3MTcwMzE2MQ.G2Q59E.BBPY-4g7eQXrlxMZIuqlvh2xoPsfxzmdxfkq3o'
+BOT_TOKEN = os.getenv('TRANSLATOR_TOKEN')
 TARGET_BOT_ID = 1492439449714561044
 
 # 建立 client 物件 (必須放在 event 之前)
 intents = discord.Intents.default()
 intents.message_content = True  # 必須開啟才能讀取網址內容
 client = discord.Client(intents=intents)
+
 # ==========================================
+
+def check_needs_translation(text):
+    """檢查文字是否真的需要翻譯"""
+    if not text:
+        return False
+        
+    # 1. 移除推文裡的網址 (包含圖片連結)
+    text = re.sub(r'http\S+', '', text)
+    
+    # 2. 移除 Discord 標記 (像是 @染岡)
+    text = re.sub(r'<@\d+>', '', text)
+    
+    # 3. 核心過濾：移除所有標點符號與 Emoji
+    # \w 代表保留各國語言文字與數字，\s 代表保留空格。其餘(包含Emoji)全部殺掉
+    clean_text = re.sub(r'[^\w\s]', '', text)
+    
+    # 4. 去除頭尾多餘的空白
+    clean_text = clean_text.strip()
+    
+    # 判斷：如果清完之後變成空的，或是「只剩下純數字」，就回傳 False (不需要翻譯)
+    if not clean_text or clean_text.isnumeric():
+        return False
+        
+    return True
 
 def is_japanese(text):
     # 偵測是否含有平假名 (\u3040-\u309f) 或 片假名 (\u30a0-\u30ff)
@@ -47,6 +78,11 @@ async def on_message(message):
                             break
                 except Exception as e:
                     print(f"檢查卡片時出錯: {e}")
+            
+            # 🛑 新增：裝上過濾器！如果判定不需要翻譯，直接結束這次任務！
+            if not check_needs_translation(check_text):
+                print("推文內容為空、僅含網址或無意義符號，省略翻譯。")
+                return
             
             # 3. 檢查內容是否已經包含中文了
             # 如果裡面「有日文假名」，我們就視為「尚未翻譯的日文」，不進入省略邏輯
