@@ -111,6 +111,37 @@ def check_needs_translation(text):
     
     # 4. 去除頭尾多餘的空白
     clean_text = clean_text.strip()
+
+    # 5. 圖片/影片但「沒有內文」的推文，在 fxtwitter embed 的 description
+    #    有時會只剩互動統計（例如 23 173 1.5K）或其他非語意內容。
+    #    這種情況不應該觸發翻譯/重整，所以在這裡多做一次保護。
+    #
+    #    規則：清理後若只包含數字、空白、逗號、小數點，以及 K/M（千/百萬縮寫），就當作「沒有可翻譯內文」。
+    #    例： "23 173 1.5K"、"1,234"、"2.1M"
+    if re.fullmatch(r"[\d\s,\.kKmM]+", clean_text or ""):
+        return False
+
+    # 6. 另一個常見情況：fxtwitter 會在沒有內文的推文上，把互動統計加上英文單字
+    #    例如： "23 likes 173 reposts 1.5K views"
+    #    這些不是推文正文，不應該觸發翻譯/重整。
+    #
+    #    做法：把數字與 K/M 去掉後，只要剩下的英文字都在「互動統計詞彙表」裡，就視為無內文。
+    engagement_words = {
+        "like", "likes",
+        "reply", "replies",
+        "repost", "reposts",
+        "retweet", "retweets",
+        "quote", "quotes",
+        "view", "views",
+        "bookmark", "bookmarks",
+        "share", "shares",
+    }
+    lowered = clean_text.lower()
+    lowered_wo_numbers = re.sub(r"[\d\s,\.]+", " ", lowered)
+    lowered_wo_numbers = re.sub(r"\b[km]\b", " ", lowered_wo_numbers)  # 1.5k / 2m 這類縮寫
+    tokens = [t for t in lowered_wo_numbers.split() if t]
+    if tokens and all(t in engagement_words for t in tokens):
+        return False
     
     # 判斷：如果清完之後變成空的，或是「只剩下純數字」，就回傳 False (不需要翻譯)
     if not clean_text or clean_text.isnumeric():
@@ -156,8 +187,25 @@ async def monitor_someoka_logs():
             )
             stdout, stderr = await process.communicate()
             
-            # Docker 的日誌有時候會跑到 stderr，所以兩個都抓出來看
-            logs = stdout.decode('utf-8') + stderr.decode('utf-8')
+            # Docker 的日誌有時候會跑到 stderr，所以兩個都抓出來看。
+            #
+            # 注意：容器輸出的編碼不一定是 UTF-8（可能混到 Big5/CP950 或其他位元組）。
+            # 如果直接用 utf-8 decode 會遇到：
+            #   'utf-8' codec can't decode byte ... invalid start byte
+            #
+            # 這裡的策略是：
+            # - 優先用 utf-8 解碼
+            # - 失敗就用「取代不可解碼字元」的方式保留文字內容，避免監控任務整個中斷
+            def _safe_decode(b: bytes) -> str:
+                if not b:
+                    return ""
+                try:
+                    return b.decode("utf-8")
+                except UnicodeDecodeError:
+                    # errors="replace" 會把無法解碼的位元組變成 �，保證不會拋例外
+                    return b.decode("utf-8", errors="replace")
+
+            logs = _safe_decode(stdout) + _safe_decode(stderr)
 
             # 檢查日誌裡有沒有出現 Token 失效的關鍵字
             if "401" in logs or "Unauthorized" in logs:

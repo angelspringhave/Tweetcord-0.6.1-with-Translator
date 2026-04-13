@@ -1,6 +1,9 @@
 # 最高機密區 (絕對不准上傳)
 .env
 .env*
+.venv
+/venv/
+/.venv/
 /data
 *.tw_session
 
@@ -11,4 +14,7 @@ __pycache__/
 # Logs 日誌檔
 nohup.out
 *.log
+
+# IDE / Editor
+/.vscode/
 
