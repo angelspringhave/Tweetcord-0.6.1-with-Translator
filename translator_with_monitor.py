@@ -15,10 +15,23 @@ load_dotenv()
 # 吹雪的token與染岡的使用者ID
 BOT_TOKEN = os.getenv('TRANSLATOR_TOKEN')
 TARGET_BOT_ID = 1492439449714561044
+# ------------------------------------------
+# 可選：當偵測到 Tweetcord 的 Twitter auth_token 失效時，要 @ 提醒誰
+#
+# 你需要在 .env 裡放：ALERT_MENTION_USER_ID=你的Discord使用者ID(純數字)
+# 如果你不填、或填錯（例如不是數字），程式會自動當成 0（不 @ 任何人），避免整支 bot 起不來。
+# ------------------------------------------
+_alert_mention_user_id_raw = (os.getenv("ALERT_MENTION_USER_ID", "") or "").strip()
+if _alert_mention_user_id_raw.isdigit():
+    ALERT_MENTION_USER_ID = int(_alert_mention_user_id_raw)
+else:
+    ALERT_MENTION_USER_ID = 0
 
 # --- 新增的監控設定 ---
-# 替換成你想收到警報的 Discord 頻道 ID (請複製頻道ID，這必須是純數字，不能有引號)
-ALERT_CHANNEL_ID = 1489990475242012834 
+# 警告要送到的 Discord 頻道需要在 .env 放：ALERT_CHANNEL_ID=某個頻道ID(純數字)
+# 如果不填，會是 0，代表找不到頻道 -> 不會發警告（但 bot 仍會正常跑翻譯流程）
+_alert_channel_id_raw = (os.getenv("ALERT_CHANNEL_ID", "") or "").strip()
+ALERT_CHANNEL_ID = int(_alert_channel_id_raw) if _alert_channel_id_raw.isdigit() else 0
 # 替換成你的染岡 Docker 容器名稱 (可以在 VM 輸入 docker ps 查看 NAMES 那欄)
 DOCKER_CONTAINER_NAME = "tweetcord"
 
@@ -26,8 +39,60 @@ DOCKER_CONTAINER_NAME = "tweetcord"
 intents = discord.Intents.default()
 intents.message_content = True  # 必須開啟才能讀取網址內容
 client = discord.Client(intents=intents)
+ALLOWED_MENTIONS_NONE = discord.AllowedMentions.none()
 
 # ==========================================
+
+def strip_discord_mentions(text: str) -> str:
+    if not text:
+        return text
+
+    # ------------------------------------------
+    # 這個函式的目標：
+    # - 讓「吹雪送出去的訊息內容」不要帶有會被 Discord 顯示成提及/跳轉的語法
+    # - 即使你不小心把染岡（Tweetcord）原文整段複製過來，也不會看到一堆 @mention
+    #
+    # 注意：這是「文字層面」的清理（讓畫面上不要出現提及語法）。
+    # 另外我們也會在 send() 用 allowed_mentions 做「功能層面」的保護（避免真的 ping 到人）。
+    # 兩個一起做最安全。
+    # ------------------------------------------
+
+    # 移除 Discord 會解析的提及語法，避免「複製到吹雪訊息」時還出現 @mention
+    # 使用者: <@123>、<@!123>
+    text = re.sub(r'<@!?\d+>', '', text)
+    # 身分組: <@&123>
+    text = re.sub(r'<@&\d+>', '', text)
+    # 頻道: <#123>
+    text = re.sub(r'<#\d+>', '', text)
+    # @everyone / @here
+    text = re.sub(r'@everyone\b', 'everyone', text, flags=re.IGNORECASE)
+    text = re.sub(r'@here\b', 'here', text, flags=re.IGNORECASE)
+
+    return text
+
+async def get_alert_channel():
+    """
+    取得「警報要送到哪個頻道」。
+
+    為什麼要這樣寫？
+    - client.get_channel(id) 只會從快取拿，有時候機器人剛啟動、或沒快取到該頻道，會拿到 None
+    - 在 VM/容器環境重啟很常發生「快取還沒暖起來」
+
+    所以我們做 fallback：拿不到就用 API fetch_channel 再抓一次。
+    """
+    if not ALERT_CHANNEL_ID:
+        print("ALERT_CHANNEL_ID 未設定或不是數字，因此不會發警告訊息。")
+        return None
+
+    channel = client.get_channel(ALERT_CHANNEL_ID)
+    if channel:
+        return channel
+
+    try:
+        return await client.fetch_channel(ALERT_CHANNEL_ID)
+    except Exception as e:
+        print(f"找不到警告回報頻道，請確認 ALERT_CHANNEL_ID 是否正確，且 bot 有權限看到該頻道！err={e}")
+        return None
 
 def check_needs_translation(text):
     """檢查文字是否真的需要翻譯"""
@@ -38,7 +103,7 @@ def check_needs_translation(text):
     text = re.sub(r'http\S+', '', text)
     
     # 2. 移除 Discord 標記 (像是 @染岡)
-    text = re.sub(r'<@\d+>', '', text)
+    text = strip_discord_mentions(text)
     
     # 3. 核心過濾：移除所有標點符號與 Emoji
     # \w 代表保留各國語言文字與數字，\s 代表保留空格。其餘(包含Emoji)全部殺掉
@@ -64,11 +129,18 @@ def has_chinese(text):
 
 # ================== 吹雪的秘密監視任務 ==================
 async def monitor_someoka_logs():
+    """
+    監控 Tweetcord 容器日誌，偵測 token 失效並發出警告。
+
+    重要提醒（你說你在 VM 上跑、也不確定權限）：
+    - 這段會在同一台 VM 上執行 `docker logs ...`
+    - 需要「吹雪所在的環境」能執行 docker 指令，且有權限讀取 `DOCKER_CONTAINER_NAME` 那個容器的 logs
+    - 如果權限不足，這段不會讓 bot 當掉，但會印出錯誤，並持續每 10 分鐘重試
+    """
     await client.wait_until_ready()
-    channel = client.get_channel(ALERT_CHANNEL_ID)
+    channel = await get_alert_channel()
     
     if not channel:
-        print("找不到警報頻道，請確認 ALERT_CHANNEL_ID 是否正確！")
         return
 
     while not client.is_closed():
@@ -87,16 +159,30 @@ async def monitor_someoka_logs():
             # Docker 的日誌有時候會跑到 stderr，所以兩個都抓出來看
             logs = stdout.decode('utf-8') + stderr.decode('utf-8')
 
-            # 檢查日誌裡有沒有出現 Token 過期的關鍵字
+            # 檢查日誌裡有沒有出現 Token 失效的關鍵字
             if "401" in logs or "Unauthorized" in logs:
-                await channel.send("🚨 **警告！** 染岡同學，你的 Twitter Token 好像過期了～")
+                mention_prefix = (
+                    f"<@{ALERT_MENTION_USER_ID}> " if ALERT_MENTION_USER_ID else ""
+                )
+                allowed_mentions = (
+                    discord.AllowedMentions(users=[discord.Object(id=ALERT_MENTION_USER_ID)])
+                    if ALERT_MENTION_USER_ID
+                    else ALLOWED_MENTIONS_NONE
+                )
+                await channel.send(
+                    mention_prefix
+                    + strip_discord_mentions(
+                        "🚨 **警告！** 染岡同學使用的 Twitter auth_token 好像失效了～"
+                    ),
+                    allowed_mentions=allowed_mentions,
+                )
                 print("已發送 auth_token 過期警告！")
                 # 為了避免吹雪每 10 分鐘就一直狂發訊息洗版，發送一次後讓他暫停監視 12 小時 (43200秒)
                 await asyncio.sleep(43200)
                 continue
                 
         except Exception as e:
-            print(f"吹雪監控 Docker 出錯: {e}")
+            print(f"Monitor 監控 Docker 出錯: {e}")
 
         # 如果沒事，吹雪就去休息，10 分鐘 (600秒) 後再來偷看一次
         await asyncio.sleep(600)
@@ -107,8 +193,28 @@ async def monitor_someoka_logs():
 async def on_ready():
     print(f'已登入為 {client.user}，開始檢查染岡同學的翻譯狀況...')
 
+    # ------------------------------------------
+    # 你原本有寫 monitor_someoka_logs()，但沒有啟動它，所以警報永遠不會發生。
+    # 這裡我們在 bot ready 後，把監控任務丟到背景執行。
+    #
+    # 這樣做的好處：
+    # - 監控與翻譯可以同時跑，不會互相卡住
+    # - 就算 docker logs 失敗，也只會在背景印錯誤，不會影響 on_message 的翻譯流程
+    # ------------------------------------------
+    asyncio.create_task(monitor_someoka_logs())
+
 @client.event
 async def on_message(message):
+    # ------------------------------------------
+    # 重要：on_message 是 Discord 事件回呼。
+    # 如果你在裡面做「等待很久」的工作（例如輪詢 embed 10 秒），
+    # 在推文很多時會同時堆很多個 handler，造成延遲、甚至看起來像卡住。
+    #
+    # 所以我們把每一則要處理的訊息丟到背景 task，讓事件回呼快速返回。
+    # ------------------------------------------
+    asyncio.create_task(process_message(message))
+
+async def process_message(message):
     # 1. 只處理染岡發出的訊息
     if message.author.id == TARGET_BOT_ID:
         
@@ -192,7 +298,12 @@ async def on_message(message):
             
             # 7. 送出翻譯訊息
             print(f"📤 [發送] 已送出重整網址: {refreshed_url}")
-            await message.channel.send(f"**真是的～染岡同學想說的是這個吧** ❄️\n{refreshed_url}")
+            await message.channel.send(
+                strip_discord_mentions(
+                    f"**真是的～染岡同學想說的是這個吧** ❄️\n{refreshed_url}"
+                ),
+                allowed_mentions=ALLOWED_MENTIONS_NONE,
+            )
 
 # 啟動機器人
 client.run(BOT_TOKEN)

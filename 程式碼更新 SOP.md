@@ -13,4 +13,3 @@ nohup python3 -u translator_with_monitor.py &`
    
 6. 若想在 VM 裡用前景跑：先用 `pkill -f translator_with_monitor.py` 把背景執行停止，再執行 `python3 translator_with_monitor.py`。但須注意一旦關掉 VM 的 SSH 連線視窗， translator_with_monitor.py 也會直接跟著停止。
 當確定測試都沒問題後，記得要用 Ctrl + C 停止，並改回 `nohup python3 -u translator_with_monitor.py &` 使其回背景執行。
-
