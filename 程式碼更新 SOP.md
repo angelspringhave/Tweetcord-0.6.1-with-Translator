@@ -1,5 +1,18 @@
 # 標準作業流程
 
+---
+使用 Systemd 後：
+'
+
+cd ~/Tweetcord
+git pull
+
+# 讓 Systemd 重新啟動該服務，它會自動抓新的程式碼跑
+sudo systemctl restart tweetcord_translator_with_monitor
+
+'
+---
+
 1. 在 VS Code：直接修改程式碼。
    
 2. 在 VS Code：按下 Commit 和 Sync Changes（Push），把修改推上 GitHub。
@@ -8,7 +21,9 @@
    
 4. VM 裡：輸入 `git pull` 或 `git pull origin main` 更新檔案，然後重開吹雪，執行 `
 pkill -f translator_with_monitor.py
-nohup python3 -u translator_with_monitor.py &`
+nohup python3 -u translator_with_monitor.py &
+tail -f nohup.out
+`
 
 5. VM 裡：若不想看 log，則 4. 可不執行 `tail -f nohup.out`。
    
