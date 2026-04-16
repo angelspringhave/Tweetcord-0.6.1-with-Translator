@@ -308,7 +308,13 @@ async def process_message(message):
             if "翻譯自" in embed_full_text:
                 if "原文" in check_text:
                     parts = check_text.split("原文")
-                    translated_part = parts[0].strip()
+                    raw_translated = parts[0]
+                    
+                    # 掃除 Tweetcord 的標籤「📄 翻譯自日文/英文...」與 Discord 引言符號「>」
+                    cleaned_translated = re.sub(r'📄?\s*翻譯自.*', '', raw_translated)
+                    cleaned_translated = re.sub(r'>', '', cleaned_translated)
+                    # 去除頭尾多餘的空白與換行，還原真實的翻譯內容
+                    translated_part = cleaned_translated.strip()
                     original_part = parts[1].strip() if len(parts) > 1 else ""
                     
                     if not translated_part:

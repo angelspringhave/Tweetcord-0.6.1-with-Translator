@@ -1,0 +1,5 @@
+﻿fix(translator): avoid translating engagement-only embeds and decode logs safely
+
+- Skip translation for fxtwitter embeds that contain only engagement stats
+- Decode docker logs with utf-8 fallback to prevent monitor crash
+- Ignore local venv and editor settings in .gitignore
