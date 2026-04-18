@@ -319,6 +319,9 @@ async def process_message(message):
                     
                     if not translated_part:
                         print(f"🔄 [重整] 翻譯結果為空白 | 網址: {log_url}")
+                    elif not check_needs_translation(translated_part):
+                        print(f"⏭️ [省略] 翻譯結果為純符號/Emoji，無需處理 | 網址: {log_url}")
+                        return
                     elif translated_part == original_part:
                         print(f"🔄 [重整] 翻譯結果與原文相同 (無效翻譯) | 網址: {log_url}")
                     elif is_japanese(translated_part):
