@@ -51,7 +51,7 @@ auto_translation:
 ### `translator_with_monitor.py` 設定區
 
 ```python
-TARGET_BOT_ID = 1492439449714561044  # 染岡的 bot user ID
+TARGET_BOT_ID =   # 染岡的 bot user ID
 DOCKER_CONTAINER_NAME = "tweetcord"  # docker ps 查到的容器名稱
 ```
 
