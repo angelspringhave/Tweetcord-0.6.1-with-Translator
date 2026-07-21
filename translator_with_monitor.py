@@ -158,6 +158,62 @@ def has_chinese(text):
     # 偵測是否包含任何中文字符 (CJK 統一表意文字)
     return re.search(r'[\u4e00-\u9fa5]', text) is not None
 
+def collect_embed_text(embed_dict):
+    """把 Discord embed 裡所有文字欄位攤平成一段可搜尋文字。"""
+    texts = []
+
+    def collect(value):
+        if isinstance(value, str):
+            texts.append(value)
+        elif isinstance(value, dict):
+            for item in value.values():
+                collect(item)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+
+    collect(embed_dict)
+    return "\n".join(texts)
+
+def clean_translation_text(text):
+    if not text:
+        return ""
+
+    # 移除 Discord 引言符號與 Fxtwitter 的「翻譯自...」標籤，只留下真正內容。
+    text = re.sub(r'(?m)^\s*>\s?', '', text)
+    text = re.sub(r'(?m)^\s*📄?\s*翻譯自[^\r\n]*', '', text)
+    return strip_discord_mentions(text).strip()
+
+def extract_translation_parts(description_text, embed_text):
+    """
+    從 embed 文字中拆出「翻譯結果」和「原文」。
+
+    空白翻譯最容易漏判的情況是：description 裡有「翻譯自」，
+    但「原文」被 Discord/Fxtwitter 放在其他 embed 欄位。這裡會同時檢查
+    description 與攤平後的整個 embed。
+    """
+    candidates = []
+    for text in (description_text, embed_text):
+        if text and "翻譯自" in text:
+            candidates.append(text.replace("\\n", "\n"))
+
+    for text in candidates:
+        if "原文" not in text:
+            continue
+
+        original_marker = re.search(r'(?m)^\s*>?\s*原文\s*$', text)
+        if original_marker:
+            translated_raw = text[:original_marker.start()]
+            original_raw = text[original_marker.end():]
+        else:
+            translated_raw, original_raw = text.split("原文", 1)
+
+        translated_part = clean_translation_text(translated_raw)
+        original_part = clean_translation_text(original_raw)
+        return translated_part, original_part
+
+    return None, None
+
 # ================== 吹雪的秘密監視任務 ==================
 async def monitor_someoka_logs():
     """
@@ -283,8 +339,9 @@ async def process_message(message):
                 try:
                     updated_msg = await message.channel.fetch_message(message.id)
                     if updated_msg.embeds:
+                        embed_dict = updated_msg.embeds[0].to_dict()
                         check_text = updated_msg.embeds[0].description or ""
-                        embed_full_text = str(updated_msg.embeds[0].to_dict())
+                        embed_full_text = collect_embed_text(embed_dict)
                         # 不會一有字就急著 break，等到「翻譯自」標籤出來，代表 Fxtwitter 真的跑完了才中斷等待
                         
                         if "翻譯自" in embed_full_text:
@@ -292,13 +349,14 @@ async def process_message(message):
                 except Exception as e:
                     print(f"⚠️ 檢查卡片時出錯: {e} | 網址: {log_url}")
             
-            # 如果等了 10 秒連內文都沒有，直接放生
-            if not check_text:
+            # 如果等了 10 秒連 embed 文字都沒有，直接放生
+            if not (check_text or embed_full_text):
                 print(f"❌ [放棄] 等待超時，抓不到卡片內容 | 網址: {log_url}")
                 return 
 
             # 裝上過濾器！如果判定不需要翻譯(空字串、全符號)，直接結束
-            if not check_needs_translation(check_text):
+            text_for_check = check_text or embed_full_text
+            if not check_needs_translation(text_for_check):
                 print(f"⏭️ [省略] 內容為空或無意義符號 | 網址: {log_url}")
                 return
             
@@ -306,17 +364,9 @@ async def process_message(message):
             
             # 優先級 1：檢查卡片裡是否有「翻譯自」(代表 Fxtwitter 有嘗試翻譯)
             if "翻譯自" in embed_full_text:
-                if "原文" in check_text:
-                    parts = check_text.split("原文")
-                    raw_translated = parts[0]
-                    
-                    # 掃除 Tweetcord 的標籤「📄 翻譯自日文/英文...」與 Discord 引言符號「>」
-                    cleaned_translated = re.sub(r'📄?\s*翻譯自.*', '', raw_translated)
-                    cleaned_translated = re.sub(r'>', '', cleaned_translated)
-                    # 去除頭尾多餘的空白與換行，還原真實的翻譯內容
-                    translated_part = cleaned_translated.strip()
-                    original_part = parts[1].strip() if len(parts) > 1 else ""
-                    
+                translated_part, original_part = extract_translation_parts(check_text, embed_full_text)
+
+                if original_part is not None:
                     if not translated_part:
                         print(f"🔄 [重整] 翻譯結果為空白 | 網址: {log_url}")
                     elif not check_needs_translation(translated_part):
@@ -332,13 +382,13 @@ async def process_message(message):
                         print(f"\n✅ [通過] 偵測到有效翻譯，不需處理 | 網址: {log_url}")
                         return
                 else:
-                    print(f"\n✅ [通過] 有「翻譯自」且無原文對照，確認為已翻譯 | 網址: {log_url}")
-                    return
+                    # 有翻譯標籤卻拆不到原文時，不再直接當作成功，避免空白翻譯被誤判。
+                    print(f"🔄 [重整] 有「翻譯自」但無法拆出原文對照，疑似翻譯卡片格式異常 | 網址: {log_url}")
             
             # 優先級 2：沒有「翻譯自」標記(代表 Fxtwitter 全無反應)
             else:
                 # 只要整段文字「沒有中文」(代表是外文)，或是「含有日文假名」，一律觸發重整
-                if not has_chinese(check_text) or is_japanese(check_text):
+                if not has_chinese(text_for_check) or is_japanese(text_for_check):
                     print(f"🔄 [重整] 發現未翻譯的外文推文 (無中文或含日文) | 網址: {log_url}")
                 else:
                     print(f"\n✅ [通過] 推文為純中文，不需翻譯 | 網址: {log_url}")
