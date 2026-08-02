@@ -192,10 +192,31 @@ def extract_translation_parts(description_text, embed_text):
     但「原文」被 Discord/Fxtwitter 放在其他 embed 欄位。這裡會同時檢查
     description 與攤平後的整個 embed。
     """
+    description_text = (description_text or "").replace("\\n", "\n")
+
+    # 新版 Fxtwitter 會把「翻譯自…」與翻譯結果放在 description，
+    # 再把「原文」放到另一個 Embed 欄位。不能把整張 Embed 攤平後再當成
+    # 翻譯結果，否則標題、作者或原文會讓真正的空白翻譯看起來像有內容。
+    if "翻譯自" in description_text:
+        original_marker = re.search(r'(?m)^\s*>?\s*原文\s*$', description_text)
+        if original_marker:
+            translated_raw = description_text[:original_marker.start()]
+            original_raw = description_text[original_marker.end():]
+        else:
+            translated_raw = description_text
+            original_raw = ""
+
+        translated_part = clean_translation_text(translated_raw)
+        original_part = clean_translation_text(original_raw)
+
+        # 原文可能被放在其他欄位；description 仍是唯一的翻譯結果來源。
+        # 因此即使 original_part 為空，也要直接回傳，避免整張 Embed 的
+        # 標題或原文文字掩蓋真正的空白翻譯。
+        return translated_part, original_part
+
     candidates = []
-    for text in (description_text, embed_text):
-        if text and "翻譯自" in text:
-            candidates.append(text.replace("\\n", "\n"))
+    if embed_text and "翻譯自" in embed_text:
+        candidates.append(embed_text.replace("\\n", "\n"))
 
     for text in candidates:
         if "原文" not in text:
