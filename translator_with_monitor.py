@@ -1,10 +1,12 @@
-﻿import discord
+import discord
 import sys
 sys.stdout.reconfigure(encoding='utf-8')
 import asyncio
 import random
 import re
 import os
+import logging
+from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
 
 # ================= 設定區 =================
@@ -35,6 +37,44 @@ ALERT_CHANNEL_ID = int(_alert_channel_id_raw) if _alert_channel_id_raw.isdigit()
 # 替換成你的染岡 Docker 容器名稱 (可以在 VM 輸入 docker ps 查看 NAMES 那欄)
 DOCKER_CONTAINER_NAME = "tweetcord"
 
+# ------------------------------------------
+# 進階設定：全部都可以在 .env 覆寫，不填就用預設值，一般不需要更動。
+# 這些數字如果在 .env 裡填錯格式（不是數字），會自動退回預設值，不會讓 bot 整支起不來。
+# ------------------------------------------
+def _get_int_env(name, default):
+    raw = (os.getenv(name, "") or "").strip()
+    return int(raw) if raw.isdigit() else default
+
+def _get_float_env(name, default):
+    raw = (os.getenv(name, "") or "").strip()
+    try:
+        return float(raw) if raw else default
+    except ValueError:
+        return default
+
+# 等待卡片：最多檢查幾次、每次間隔幾秒（預設 5 次 * 2 秒 = 最多等 10 秒，跟原本行為一樣）
+POLL_MAX_ATTEMPTS = _get_int_env("POLL_MAX_ATTEMPTS", 5)
+POLL_INTERVAL_SECONDS = _get_float_env("POLL_INTERVAL_SECONDS", 2.0)
+
+# 重整網址最多重試幾次（試完還是失敗就放棄，並發警告到 ALERT_CHANNEL_ID）
+MAX_RETRIES = _get_int_env("MAX_RETRIES", 3)
+
+# 每次重試前，依序要多等幾秒才送出重整網址（次數超過清單長度就一律用最後一個數字）
+# 例如翻譯剛好卡住/被暫時限制流量時，越等越久比「馬上重試」更容易成功。
+_retry_backoff_raw = (os.getenv("RETRY_BACKOFF_SECONDS", "") or "").strip()
+try:
+    RETRY_BACKOFF_SECONDS = [float(x.strip()) for x in _retry_backoff_raw.split(",") if x.strip()]
+    if not RETRY_BACKOFF_SECONDS:
+        raise ValueError
+except ValueError:
+    RETRY_BACKOFF_SECONDS = [5.0, 15.0, 45.0]
+
+# 紀錄檔設定：檔名、單一檔案上限（bytes）、最多保留幾份舊檔。
+# 有上限+自動輪替，硬碟不會被無限塞爆（預設頂多約 5MB * 3 = 15MB 左右）。
+LOG_FILE_PATH = os.getenv("LOG_FILE_PATH", "translator.log")
+LOG_MAX_BYTES = _get_int_env("LOG_MAX_BYTES", 5 * 1024 * 1024)
+LOG_BACKUP_COUNT = _get_int_env("LOG_BACKUP_COUNT", 3)
+
 # 建立 client 物件 (必須放在 event 之前)
 intents = discord.Intents.default()
 intents.message_content = True  # 必須開啟才能讀取網址內容
@@ -42,6 +82,25 @@ client = discord.Client(intents=intents)
 ALLOWED_MENTIONS_NONE = discord.AllowedMentions.none()
 
 # ==========================================
+# 紀錄（Log）設定：畫面照樣看得到（跟原本 print 一樣），同時額外存一份到檔案，
+# 方便之後回頭查「翻譯到底失敗幾次」，檔案還會自動輪替、不會佔滿硬碟。
+# ==========================================
+logger = logging.getLogger("translator")
+logger.setLevel(logging.INFO)
+logger.propagate = False
+
+_console_handler = logging.StreamHandler(sys.stdout)
+_console_handler.setFormatter(logging.Formatter("%(message)s"))
+logger.addHandler(_console_handler)
+
+try:
+    _file_handler = RotatingFileHandler(
+        LOG_FILE_PATH, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8"
+    )
+    _file_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    logger.addHandler(_file_handler)
+except Exception as e:
+    logger.warning(f"⚠️ 無法建立紀錄檔 {LOG_FILE_PATH}，將只輸出到畫面: {e}")
 
 def strip_discord_mentions(text: str) -> str:
     if not text:
@@ -81,7 +140,7 @@ async def get_alert_channel():
     所以我們做 fallback：拿不到就用 API fetch_channel 再抓一次。
     """
     if not ALERT_CHANNEL_ID:
-        print("ALERT_CHANNEL_ID 未設定或不是數字，因此不會發警告訊息。")
+        logger.info("ALERT_CHANNEL_ID 未設定或不是數字，因此不會發警告訊息。")
         return None
 
     channel = client.get_channel(ALERT_CHANNEL_ID)
@@ -91,24 +150,24 @@ async def get_alert_channel():
     try:
         return await client.fetch_channel(ALERT_CHANNEL_ID)
     except Exception as e:
-        print(f"找不到警告回報頻道，請確認 ALERT_CHANNEL_ID 是否正確，且 bot 有權限看到該頻道！err={e}")
+        logger.error(f"找不到警告回報頻道，請確認 ALERT_CHANNEL_ID 是否正確，且 bot 有權限看到該頻道！err={e}")
         return None
 
 def check_needs_translation(text):
     """檢查文字是否真的需要翻譯"""
     if not text:
         return False
-        
+
     # 1. 移除推文裡的網址 (包含圖片連結)
     text = re.sub(r'http\S+', '', text)
-    
+
     # 2. 移除 Discord 標記 (像是 @染岡)
     text = strip_discord_mentions(text)
-    
+
     # 3. 核心過濾：移除所有標點符號與 Emoji
     # \w 代表保留各國語言文字與數字，\s 代表保留空格。其餘(包含Emoji)全部殺掉
     clean_text = re.sub(r'[^\w\s]', '', text)
-    
+
     # 4. 去除頭尾多餘的空白
     clean_text = clean_text.strip()
 
@@ -142,21 +201,21 @@ def check_needs_translation(text):
     tokens = [t for t in lowered_wo_numbers.split() if t]
     if tokens and all(t in engagement_words for t in tokens):
         return False
-    
+
     # 判斷：如果清完之後變成空的，或是「只剩下純數字」，就回傳 False (不需要翻譯)
     if not clean_text or clean_text.isnumeric():
         return False
-        
+
     return True
 
 def is_japanese(text):
-    # 偵測是否含有平假名 (\u3040-\u309f) 或 片假名 (\u30a0-\u30ff)
+    # 偵測是否含有平假名 (぀-ゟ) 或 片假名 (゠-ヿ)
     # 這是區分日文與中文最準確的方法
-    return re.search(r'[\u3040-\u30ff]', text) is not None
+    return re.search(r'[぀-ヿ]', text) is not None
 
 def has_chinese(text):
     # 偵測是否包含任何中文字符 (CJK 統一表意文字)
-    return re.search(r'[\u4e00-\u9fa5]', text) is not None
+    return re.search(r'[一-龥]', text) is not None
 
 def collect_embed_text(embed_dict):
     """把 Discord embed 裡所有文字欄位攤平成一段可搜尋文字。"""
@@ -247,7 +306,7 @@ async def monitor_someoka_logs():
     """
     await client.wait_until_ready()
     channel = await get_alert_channel()
-    
+
     if not channel:
         return
 
@@ -255,7 +314,7 @@ async def monitor_someoka_logs():
         try:
             # 讓吹雪執行指令，抓取染岡 Docker 的最後 30 行日誌
             cmd = f"docker logs --tail 30 {DOCKER_CONTAINER_NAME}"
-            
+
             # 使用異步執行，避免這動作卡住吹雪原本的翻譯工作
             process = await asyncio.create_subprocess_shell(
                 cmd,
@@ -263,7 +322,7 @@ async def monitor_someoka_logs():
                 stderr=asyncio.subprocess.PIPE
             )
             stdout, stderr = await process.communicate()
-            
+
             # Docker 的日誌有時候會跑到 stderr，所以兩個都抓出來看。
             #
             # 注意：容器輸出的編碼不一定是 UTF-8（可能混到 Big5/CP950 或其他位元組）。
@@ -301,13 +360,13 @@ async def monitor_someoka_logs():
                     ),
                     allowed_mentions=allowed_mentions,
                 )
-                print("已發送 auth_token 過期警告！")
+                logger.info("已發送 auth_token 過期警告！")
                 # 為了避免吹雪每 10 分鐘就一直狂發訊息洗版，發送一次後讓他暫停監視 12 小時 (43200秒)
                 await asyncio.sleep(43200)
                 continue
-                
+
         except Exception as e:
-            print(f"Monitor 監控 Docker 出錯: {e}")
+            logger.error(f"Monitor 監控 Docker 出錯: {e}")
 
         # 如果沒事，吹雪就去休息，10 分鐘 (600秒) 後再來偷看一次
         await asyncio.sleep(600)
@@ -316,7 +375,7 @@ async def monitor_someoka_logs():
 
 @client.event
 async def on_ready():
-    print(f'已登入為 {client.user}，開始檢查染岡同學的翻譯狀況...')
+    logger.info(f'已登入為 {client.user}，開始檢查染岡同學的翻譯狀況...')
 
     # ------------------------------------------
     # 你原本有寫 monitor_someoka_logs()，但沒有啟動它，所以警報永遠不會發生。
@@ -339,99 +398,149 @@ async def on_message(message):
     # ------------------------------------------
     asyncio.create_task(process_message(message))
 
+async def wait_for_embed(channel, message_id, log_url):
+    """
+    輪詢等待某則訊息的 embed 出現。
+
+    最多檢查 POLL_MAX_ATTEMPTS 次、每次間隔 POLL_INTERVAL_SECONDS 秒
+    （預設 5 次 * 2 秒 = 最多等 10 秒）。一看到「翻譯自」標籤出現，
+    代表 Fxtwitter 真的跑完了，就提早結束等待。
+
+    回傳 (check_text, embed_full_text)；如果整段時間都抓不到任何 embed 內容，
+    兩個都會是空字串。
+    """
+    check_text = ""
+    embed_full_text = ""
+
+    for _ in range(POLL_MAX_ATTEMPTS):
+        await asyncio.sleep(POLL_INTERVAL_SECONDS)
+        try:
+            updated_msg = await channel.fetch_message(message_id)
+            if updated_msg.embeds:
+                embed_dict = updated_msg.embeds[0].to_dict()
+                check_text = updated_msg.embeds[0].description or ""
+                embed_full_text = collect_embed_text(embed_dict)
+
+                if "翻譯自" in embed_full_text:
+                    break
+        except Exception as e:
+            logger.warning(f"⚠️ 檢查卡片時出錯: {e} | 網址: {log_url}")
+
+    return check_text, embed_full_text
+
+def evaluate_translation(check_text, embed_full_text):
+    """
+    判斷這次抓到的卡片內容算不算「翻譯成功」。
+
+    回傳 (status, reason)：
+      - "ok"     翻譯正常，不用理它
+      - "skip"   本來就不需要翻譯（純符號/純中文/純圖片…）
+      - "retry"  翻譯結果有問題，需要送出重整網址
+      - "no_card" 完全抓不到卡片內容（可能還在跑、也可能真的失敗）
+    """
+    if not (check_text or embed_full_text):
+        return "no_card", "等待超時，抓不到卡片內容"
+
+    text_for_check = check_text or embed_full_text
+    if not check_needs_translation(text_for_check):
+        return "skip", "內容為空或無意義符號"
+
+    # 優先級 1：卡片裡有「翻譯自」(代表 Fxtwitter 有嘗試翻譯)
+    if "翻譯自" in embed_full_text:
+        translated_part, original_part = extract_translation_parts(check_text, embed_full_text)
+
+        if original_part is None:
+            # 有翻譯標籤卻拆不到原文時，不能直接當作成功，避免空白翻譯被誤判。
+            return "retry", "有「翻譯自」但無法拆出原文對照，疑似翻譯卡片格式異常"
+
+        if not translated_part:
+            return "retry", "翻譯結果為空白"
+        if not check_needs_translation(translated_part):
+            return "skip", "翻譯結果為純符號/Emoji，無需處理"
+        if translated_part == original_part:
+            return "retry", "翻譯結果與原文相同 (無效翻譯)"
+        if is_japanese(translated_part):
+            return "retry", "翻譯結果仍包含日文假名"
+        if not has_chinese(translated_part):
+            return "retry", "翻譯結果完全不含中文 (翻譯失敗)"
+        return "ok", "偵測到有效翻譯"
+
+    # 優先級 2：沒有「翻譯自」標記(代表 Fxtwitter 全無反應)
+    if not has_chinese(text_for_check) or is_japanese(text_for_check):
+        return "retry", "發現未翻譯的外文推文 (無中文或含日文)"
+
+    return "skip", "推文為純中文，不需翻譯"
+
+async def send_final_failure_alert(original_url, reason):
+    """重試次數用完了還是失敗，發一則警告到警報頻道，讓你知道這則需要自己看一下。"""
+    channel = await get_alert_channel()
+    if not channel:
+        return
+    try:
+        await channel.send(
+            strip_discord_mentions(
+                f"⚠️ **翻譯重試失敗** 這則推文已重試 {MAX_RETRIES} 次仍無法正常翻譯"
+                f"（最後一次原因：{reason}），麻煩自己看一下：\n{original_url}"
+            ),
+            allowed_mentions=ALLOWED_MENTIONS_NONE,
+        )
+    except Exception as e:
+        logger.error(f"發送最終失敗警告時出錯: {e}")
+
 async def process_message(message):
     # 1. 只處理染岡發出的訊息
-    if message.author.id == TARGET_BOT_ID:
-        
-        # 2. 判斷是否為 fxtwitter 連結且需要翻譯
-        if "fxtwitter.com" in message.content and "/zh-TW" in message.content and "?" not in message.content:
-            
-            # 把原本的推文內容(通常就是網址)存起來，方便印在 Log 裡
-            log_url = message.content 
-            print(f"\n🔍 [開始檢查] 收到新推文: {log_url}")
-            
-            check_text = ""
-            embed_full_text = "" 
-            
-            # 6. 【等待邏輯：輪詢檢查】等待原本的預覽跑完
-            # 最多等待 10 秒，每 2 秒檢查一次
-            for i in range(5): 
-                await asyncio.sleep(2) 
-                try:
-                    updated_msg = await message.channel.fetch_message(message.id)
-                    if updated_msg.embeds:
-                        embed_dict = updated_msg.embeds[0].to_dict()
-                        check_text = updated_msg.embeds[0].description or ""
-                        embed_full_text = collect_embed_text(embed_dict)
-                        # 不會一有字就急著 break，等到「翻譯自」標籤出來，代表 Fxtwitter 真的跑完了才中斷等待
-                        
-                        if "翻譯自" in embed_full_text:
-                            break 
-                except Exception as e:
-                    print(f"⚠️ 檢查卡片時出錯: {e} | 網址: {log_url}")
-            
-            # 如果等了 10 秒連 embed 文字都沒有，直接放生
-            if not (check_text or embed_full_text):
-                print(f"❌ [放棄] 等待超時，抓不到卡片內容 | 網址: {log_url}")
-                return 
+    if message.author.id != TARGET_BOT_ID:
+        return
 
-            # 裝上過濾器！如果判定不需要翻譯(空字串、全符號)，直接結束
-            text_for_check = check_text or embed_full_text
-            if not check_needs_translation(text_for_check):
-                print(f"⏭️ [省略] 內容為空或無意義符號 | 網址: {log_url}")
-                return
-            
-            # ================== 【乾淨俐落的兩段式過濾】 ==================
-            
-            # 優先級 1：檢查卡片裡是否有「翻譯自」(代表 Fxtwitter 有嘗試翻譯)
-            if "翻譯自" in embed_full_text:
-                translated_part, original_part = extract_translation_parts(check_text, embed_full_text)
+    # 2. 判斷是否為 fxtwitter 連結且需要翻譯
+    if not ("fxtwitter.com" in message.content and "/zh-TW" in message.content and "?" not in message.content):
+        return
 
-                if original_part is not None:
-                    if not translated_part:
-                        print(f"🔄 [重整] 翻譯結果為空白 | 網址: {log_url}")
-                    elif not check_needs_translation(translated_part):
-                        print(f"⏭️ [省略] 翻譯結果為純符號/Emoji，無需處理 | 網址: {log_url}")
-                        return
-                    elif translated_part == original_part:
-                        print(f"🔄 [重整] 翻譯結果與原文相同 (無效翻譯) | 網址: {log_url}")
-                    elif is_japanese(translated_part):
-                        print(f"🔄 [重整] 翻譯結果仍包含日文假名 | 網址: {log_url}")
-                    elif not has_chinese(translated_part):
-                        print(f"🔄 [重整] 翻譯結果完全不含中文 (翻譯失敗) | 網址: {log_url}")
-                    else:
-                        print(f"\n✅ [通過] 偵測到有效翻譯，不需處理 | 網址: {log_url}")
-                        return
-                else:
-                    # 有翻譯標籤卻拆不到原文時，不再直接當作成功，避免空白翻譯被誤判。
-                    print(f"🔄 [重整] 有「翻譯自」但無法拆出原文對照，疑似翻譯卡片格式異常 | 網址: {log_url}")
-            
-            # 優先級 2：沒有「翻譯自」標記(代表 Fxtwitter 全無反應)
-            else:
-                # 只要整段文字「沒有中文」(代表是外文)，或是「含有日文假名」，一律觸發重整
-                if not has_chinese(text_for_check) or is_japanese(text_for_check):
-                    print(f"🔄 [重整] 發現未翻譯的外文推文 (無中文或含日文) | 網址: {log_url}")
-                else:
-                    print(f"\n✅ [通過] 推文為純中文，不需翻譯 | 網址: {log_url}")
-                    return
-            
-            # ==============================================================
-            # 走到這裡代表需要重整
+    original_url = message.content
+    channel = message.channel
+    current_message_id = message.id
+    current_url = original_url
 
-            # 4. 產生一個隨機數作為亂碼
-            random_num = random.randint(100, 9999)
-            
-            # 5. 在網址最後面加上 ?隨機數
-            refreshed_url = message.content.replace("/zh-TW", f"/zh-TW?{random_num}")
-            
-            # 7. 送出翻譯訊息
-            print(f"📤 [發送] 已送出重整網址: {refreshed_url}")
-            await message.channel.send(
-                strip_discord_mentions(
-                    f"**真是的～染岡同學想說的是這個吧** ❄️\n{refreshed_url}"
-                ),
-                allowed_mentions=ALLOWED_MENTIONS_NONE,
-            )
+    # 3. 最多嘗試 MAX_RETRIES + 1 次（第一次是原本的訊息，之後才算重試）
+    for attempt in range(MAX_RETRIES + 1):
+        log_url = current_url
+        logger.info(f"\n🔍 [開始檢查] (第 {attempt + 1} 次) 網址: {log_url}")
+
+        check_text, embed_full_text = await wait_for_embed(channel, current_message_id, log_url)
+        status, reason = evaluate_translation(check_text, embed_full_text)
+
+        if status == "ok":
+            logger.info(f"✅ [通過] {reason} | 網址: {log_url}")
+            return
+        if status == "skip":
+            logger.info(f"⏭️ [省略] {reason} | 網址: {log_url}")
+            return
+
+        # status 是 "retry" 或 "no_card"，都需要送出重整網址再試一次
+        logger.info(f"🔄 [需要重整] {reason} | 網址: {log_url}")
+
+        if attempt >= MAX_RETRIES:
+            logger.warning(f"🛑 [放棄] 已重試 {MAX_RETRIES} 次仍失敗（{reason}）| 原始網址: {original_url}")
+            await send_final_failure_alert(original_url, reason)
+            return
+
+        # 越到後面等越久，避免馬上重試又剛好撞到同一個暫時性問題（例如 Fxtwitter 忙線中）
+        backoff = RETRY_BACKOFF_SECONDS[min(attempt, len(RETRY_BACKOFF_SECONDS) - 1)]
+        logger.info(f"⏳ 等待 {backoff} 秒後重試...")
+        await asyncio.sleep(backoff)
+
+        random_num = random.randint(100, 9999)
+        refreshed_url = original_url.replace("/zh-TW", f"/zh-TW?{random_num}")
+
+        logger.info(f"📤 [發送] 已送出重整網址: {refreshed_url}")
+        sent_msg = await channel.send(
+            strip_discord_mentions(
+                f"**真是的～染岡同學想說的是這個吧** ❄️\n{refreshed_url}"
+            ),
+            allowed_mentions=ALLOWED_MENTIONS_NONE,
+        )
+        current_message_id = sent_msg.id
+        current_url = refreshed_url
 
 # 啟動機器人
 client.run(BOT_TOKEN)
