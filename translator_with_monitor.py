@@ -241,8 +241,11 @@ def clean_translation_text(text):
         return ""
 
     # 移除 Discord 引言符號與 Fxtwitter 的「翻譯自...」標籤，只留下真正內容。
+    #
+    # 「翻譯自」前面可能會帶不同的圖示（📄、📝...等，Fxtwitter 自己會換），
+    # 用 [^\w\r\n]* 取代寫死某一個 emoji，才不會因為圖示換了又漏判。
     text = re.sub(r'(?m)^\s*>\s?', '', text)
-    text = re.sub(r'(?m)^\s*📄?\s*翻譯自[^\r\n]*', '', text)
+    text = re.sub(r'(?m)^[^\w\r\n]*翻譯自[^\r\n]*', '', text)
     return strip_discord_mentions(text).strip()
 
 def extract_translation_parts(description_text, embed_text):
@@ -259,7 +262,9 @@ def extract_translation_parts(description_text, embed_text):
     # 再把「原文」放到另一個 Embed 欄位。不能把整張 Embed 攤平後再當成
     # 翻譯結果，否則標題、作者或原文會讓真正的空白翻譯看起來像有內容。
     if "翻譯自" in description_text:
-        original_marker = re.search(r'(?m)^\s*>?\s*原文\s*$', description_text)
+        # 「原文」這行前面也可能被 Fxtwitter 加上圖示（例如 📝），一樣用
+        # [^\w\r\n]* 取代寫死只認 ">"，避免抓不到分界點、把原文誤判成翻譯結果。
+        original_marker = re.search(r'(?m)^[^\w\r\n]*原文[^\w\r\n]*$', description_text)
         if original_marker:
             translated_raw = description_text[:original_marker.start()]
             original_raw = description_text[original_marker.end():]
@@ -283,7 +288,7 @@ def extract_translation_parts(description_text, embed_text):
         if "原文" not in text:
             continue
 
-        original_marker = re.search(r'(?m)^\s*>?\s*原文\s*$', text)
+        original_marker = re.search(r'(?m)^[^\w\r\n]*原文[^\w\r\n]*$', text)
         if original_marker:
             translated_raw = text[:original_marker.start()]
             original_raw = text[original_marker.end():]
