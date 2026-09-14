@@ -72,10 +72,10 @@ except ValueError:
     RETRY_BACKOFF_SECONDS = [5.0, 15.0, 45.0]
 
 # 紀錄檔設定：檔名、單一檔案上限（bytes）、最多保留幾份舊檔。
-# 有上限+自動輪替，硬碟不會被無限塞爆（預設頂多約 5MB * 3 = 15MB 左右）。
+# 有上限+自動輪替，硬碟不會被無限塞爆（預設頂多約 1MB * 2 = 2MB 左右，盡量壓低）。
 LOG_FILE_PATH = os.getenv("LOG_FILE_PATH", "translator.log")
-LOG_MAX_BYTES = _get_int_env("LOG_MAX_BYTES", 5 * 1024 * 1024)
-LOG_BACKUP_COUNT = _get_int_env("LOG_BACKUP_COUNT", 3)
+LOG_MAX_BYTES = _get_int_env("LOG_MAX_BYTES", 1 * 1024 * 1024)
+LOG_BACKUP_COUNT = _get_int_env("LOG_BACKUP_COUNT", 2)
 
 # 建立 client 物件 (必須放在 event 之前)
 intents = discord.Intents.default()
@@ -446,7 +446,7 @@ def evaluate_translation(check_text, embed_full_text):
       - "no_card" 完全抓不到卡片內容（可能還在跑、也可能真的失敗）
     """
     if not (check_text or embed_full_text):
-        return "no_card", "等待超時，抓不到卡片內容"
+        return "no_card", "等待超時，無法載入卡片內容"
 
     text_for_check = check_text or embed_full_text
     if not check_needs_translation(text_for_check):
@@ -501,8 +501,8 @@ async def send_final_failure_alert(original_url, reason):
     try:
         await channel.send(
             strip_discord_mentions(
-                f"⚠️ **翻譯重試失敗** 這則推文已重試 {MAX_RETRIES} 次仍無法正常翻譯"
-                f"（最後一次原因：{reason}），麻煩自己看一下：\n{original_url}"
+                f"⚠️ **翻譯載入失敗** 此推文已重試 {MAX_RETRIES} 次仍無法正常翻譯"
+                f"（最後一次原因：{reason}）：\n{original_url}"
             ),
             allowed_mentions=ALLOWED_MENTIONS_NONE,
         )

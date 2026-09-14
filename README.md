@@ -53,8 +53,8 @@ RETRY_BACKOFF_SECONDS=   # 每次重試前依序等幾秒，逗號分隔（預�
 POLL_MAX_ATTEMPTS=       # 等待卡片最多檢查幾次（預設 5）
 POLL_INTERVAL_SECONDS=   # 每次檢查間隔幾秒（預設 2）
 LOG_FILE_PATH=           # 紀錄檔檔名（預設 translator.log）
-LOG_MAX_BYTES=           # 單一紀錄檔上限，單位 bytes（預設 5MB）
-LOG_BACKUP_COUNT=        # 最多保留幾份舊紀錄檔（預設 3，總共約 15~20MB，不會無限變大）
+LOG_MAX_BYTES=           # 單一紀錄檔上限，單位 bytes（預設 1MB）
+LOG_BACKUP_COUNT=        # 最多保留幾份舊紀錄檔（預設 2，總共約 2~3MB，不會無限變大）
 ```
 
 ### 紀錄檔
