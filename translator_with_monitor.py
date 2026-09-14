@@ -56,8 +56,10 @@ def _get_float_env(name, default):
 POLL_MAX_ATTEMPTS = _get_int_env("POLL_MAX_ATTEMPTS", 5)
 POLL_INTERVAL_SECONDS = _get_float_env("POLL_INTERVAL_SECONDS", 2.0)
 
-# 重整網址最多重試幾次（試完還是失敗就放棄，並發警告到 ALERT_CHANNEL_ID）
-MAX_RETRIES = _get_int_env("MAX_RETRIES", 3)
+# 重整網址最多重試幾次（試完還是失敗就放棄，並發警告到 ALERT_CHANNEL_ID）。
+# 預設只重試 1 次：因為 Fxtwitter 翻譯品質本身就不受我們控制，重試太多次
+# 也只是一直拿到同樣爛的翻譯，只會在頻道洗版，所以試一次就好，不行就放棄。
+MAX_RETRIES = _get_int_env("MAX_RETRIES", 1)
 
 # 每次重試前，依序要多等幾秒才送出重整網址（次數超過清單長度就一律用最後一個數字）
 # 例如翻譯剛好卡住/被暫時限制流量時，越等越久比「馬上重試」更容易成功。
@@ -471,6 +473,21 @@ def evaluate_translation(check_text, embed_full_text):
 
     return "skip", "推文為純中文，不需翻譯"
 
+async def delete_message_quietly(channel, message_id, log_url):
+    """
+    刪除吹雪自己之前發的一則重整卡片，刪不掉（已經被刪過等）就算了，不影響後續流程。
+
+    只會用來刪吹雪自己發的訊息，不會去刪染岡的原始貼文，所以不需要「管理訊息」這種
+    額外權限——bot 本來就可以刪自己發過的訊息。
+    """
+    try:
+        old_msg = await channel.fetch_message(message_id)
+        await old_msg.delete()
+    except discord.NotFound:
+        pass
+    except Exception as e:
+        logger.warning(f"⚠️ 刪除舊卡片時出錯: {e} | 網址: {log_url}")
+
 async def send_final_failure_alert(original_url, reason):
     """重試次數用完了還是失敗，發一則警告到警報頻道，讓你知道這則需要自己看一下。"""
     channel = await get_alert_channel()
@@ -528,6 +545,12 @@ async def process_message(message):
         backoff = RETRY_BACKOFF_SECONDS[min(attempt, len(RETRY_BACKOFF_SECONDS) - 1)]
         logger.info(f"⏳ 等待 {backoff} 秒後重試...")
         await asyncio.sleep(backoff)
+
+        # 送出新卡片前，先刪掉「吹雪自己上一次發的」重整卡片，讓同一篇推文的重試
+        # 訊息互相取代、不會越疊越多。注意：染岡原本發的那則（第一次，attempt == 0）
+        # 絕對不會被刪，只有吹雪自己發的重整訊息之間才會互相取代。
+        if attempt > 0:
+            await delete_message_quietly(channel, current_message_id, log_url)
 
         random_num = random.randint(100, 9999)
         refreshed_url = original_url.replace("/zh-TW", f"/zh-TW?{random_num}")
